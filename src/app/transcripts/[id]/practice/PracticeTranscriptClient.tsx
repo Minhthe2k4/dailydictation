@@ -11,6 +11,7 @@ interface Sentence {
   vietnameseMean?: string;
   vocabularyNote?: string;
   grammarNote?: string;
+  bookmarked?: boolean;
 }
 
 interface TranscriptData {

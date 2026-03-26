@@ -11,6 +11,7 @@ export async function GET() {
       id: true,
       text: true,
       level: true,
+      bookmarked: true,
     },
   });
 

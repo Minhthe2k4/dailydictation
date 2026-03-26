@@ -11,6 +11,7 @@ type Sentence = {
   vietnameseMean?: string;
   vocabularyNote?: string;
   grammarNote?: string;
+  bookmarked?: boolean;
 };
 
 type AttemptItem = {
@@ -36,17 +37,68 @@ export function DictationTrainer({ sentences: initialSentences, initialHistory =
   const [audioDuration, setAudioDuration] = useState(0);
   const [audioPlaying, setAudioPlaying] = useState(false);
 
-  const [sentences] = useState(initialSentences);
-  const [history, setHistory] = useState(initialHistory);
   const [activeIndex, setActiveIndex] = useState(0);
+  const [sentences] = useState(initialSentences);
+  // Bookmark state (local optimistic update)
+  const [sentencesState, setSentencesState] = useState(sentences);
+  useEffect(() => { setSentencesState(sentences); }, [sentences]);
+  const [bookmarking, setBookmarking] = useState(false);
+  const activeSentenceWithBookmark = useMemo(() => sentencesState[activeIndex], [activeIndex, sentencesState]);
+  async function handleToggleBookmark() {
+    if (!activeSentenceWithBookmark) return;
+    setBookmarking(true);
+    const prev = activeSentenceWithBookmark.bookmarked;
+    setSentencesState((prevList) => prevList.map((s, i) => i === activeIndex ? { ...s, bookmarked: !prev } : s));
+    try {
+      await fetch("/api/sentences/bookmark", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sentenceId: activeSentenceWithBookmark.id, bookmarked: !prev }),
+      });
+    } catch {
+      setSentencesState((prevList) => prevList.map((s, i) => i === activeIndex ? { ...s, bookmarked: prev } : s));
+    } finally {
+      setBookmarking(false);
+    }
+  }
+  const [history, setHistory] = useState(initialHistory);
+
+  // Key for localStorage (unique per transcript if possible)
+  // Use transcript id if available for unique key, fallback to generic
+  const transcriptId = sentences.length > 0 ? sentences[0]?.id?.split('-')[0] || '' : '';
+  const localStorageKey = transcriptId ? `dictation-active-index-${transcriptId}` : 'dictation-active-index';
+
+  // On mount, restore activeIndex from localStorage
+  useEffect(() => {
+    if (typeof window !== 'undefined' && sentences.length > 0) {
+      const saved = window.localStorage.getItem(localStorageKey);
+      if (saved !== null) {
+        const idx = parseInt(saved, 10);
+        if (!isNaN(idx) && idx >= 0 && idx < sentences.length) {
+          setActiveIndex(idx);
+        }
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sentences.length, localStorageKey]);
+
+  // Whenever activeIndex changes, save to localStorage
+  useEffect(() => {
+    if (typeof window !== 'undefined' && sentences.length > 0) {
+      window.localStorage.setItem(localStorageKey, String(activeIndex));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeIndex, sentences.length, localStorageKey]);
   const [typedText, setTypedText] = useState("");
   const [loading, setLoading] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [showAnswer, setShowAnswer] = useState(false);
+  // Gemini API output shape
   const [analysis, setAnalysis] = useState<{
-    translation?: string;
     vocabulary?: { word: string; meaning: string }[];
-    grammar?: { pattern: string; explanation: string }[];
+    grammar?: string;
+    meaning?: string;
+    examples?: string[];
     error?: string;
   } | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
@@ -176,26 +228,42 @@ export function DictationTrainer({ sentences: initialSentences, initialHistory =
     setShowAnswer(false);
   };
 
-  if (!activeSentence) {
+  if (!activeSentenceWithBookmark) {
     return <p className="rounded-2xl bg-white/70 p-6">Không có câu nghe để luyện.</p>;
   }
 
   // Hàm gọi API phân tích khi xem đáp án
   const handleShowAnswer = async () => {
     setShowAnswer((prev) => !prev);
-    // Nếu chuyển sang trạng thái showAnswer=true thì gọi API
+    // Nếu chuyển sang trạng thái showAnswer=true thì gọi Gemini API
     if (!showAnswer && activeSentence?.text) {
       setAnalyzing(true);
       setAnalysis(null);
       try {
-        const res = await fetch("/api/analyze-sentence", {
+        const res = await fetch("/api/gemini-explain", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: activeSentence.text, lang: "ko" })
+          body: JSON.stringify({ sentence: activeSentence.text })
         });
-        if (!res.ok) throw new Error("Không phân tích được câu này.");
+        if (!res.ok) {
+          const data = await res.json();
+          throw new Error(data.error || "Không phân tích được câu này.");
+        }
         const data = await res.json();
-        setAnalysis(data);
+        // Normalize vocabulary: if array of strings, convert to {word, meaning}
+        let vocab = data.vocabulary;
+        if (Array.isArray(vocab) && typeof vocab[0] === 'string') {
+          vocab = vocab.map((item: string) => {
+            const [word, ...rest] = item.split(":");
+            return { word: word.trim(), meaning: rest.join(":").trim() };
+          });
+        }
+        setAnalysis({
+          vocabulary: vocab,
+          grammar: data.grammar,
+          meaning: data.meaning,
+          examples: data.examples,
+        });
       } catch (e) {
         setAnalysis({ error: (e instanceof Error ? e.message : "Lỗi không xác định") });
       } finally {
@@ -208,22 +276,54 @@ export function DictationTrainer({ sentences: initialSentences, initialHistory =
     <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
       <section className="rounded-3xl bg-white p-6 shadow-xl ring-1 ring-black/5">
         {/* Chỉ mục số câu hiện tại */}
-        <div className="mb-2 text-sm font-semibold text-[#0f3f42]">
+        <div className="mb-2 text-sm font-semibold text-[#0f3f42] flex items-center gap-2">
           Câu {activeIndex + 1}/{sentences.length}
+          <form
+            onSubmit={e => {
+              e.preventDefault();
+              const input = e.currentTarget.elements.namedItem('jumpTo') as HTMLInputElement;
+              const val = parseInt(input.value, 10);
+              if (!isNaN(val) && val >= 1 && val <= sentences.length) {
+                setActiveIndex(val - 1);
+              }
+              input.value = '';
+            }}
+          >
+            <input
+              type="number"
+              name="jumpTo"
+              min={1}
+              max={sentences.length}
+              placeholder="Tới số..."
+              className="ml-2 w-16 px-2 py-1 border rounded text-sm"
+            />
+            <button type="submit" className="ml-1 px-2 py-1 rounded bg-blue-500 text-white text-xs">Tới</button>
+          </form>
+        </div>
+        <div className="flex items-center gap-2 mb-2">
+          <button
+            aria-label={activeSentenceWithBookmark?.bookmarked ? "Bỏ đánh dấu câu này" : "Đánh dấu câu này"}
+            onClick={handleToggleBookmark}
+            disabled={bookmarking}
+            className={"text-2xl transition " + (activeSentenceWithBookmark?.bookmarked ? "text-yellow-400" : "text-gray-300 hover:text-yellow-400")}
+            style={{ cursor: bookmarking ? "not-allowed" : "pointer" }}
+          >
+            {activeSentenceWithBookmark?.bookmarked ? "⭐" : "☆"}
+          </button>
         </div>
         <p className="text-sm font-semibold uppercase tracking-wider text-[#0f3f42]">
           Luyện nghe tiếng Hàn
         </p>
         <h2 className="mt-2 text-2xl font-bold text-[#132329]">Nghe và chép chính tả</h2>
         <p className="mt-2 text-sm text-[#33545d]">
-          Cấp độ: <span className="font-semibold">{activeSentence.level}</span>
+          Cấp độ: <span className="font-semibold">{activeSentenceWithBookmark.level}</span>
         </p>
-        {((typeof activeSentence.startSec === "number") ||
-          (typeof activeSentence.endSec === "number")) && (
-          <p className="mt-1 text-sm text-[#33545d]">
-            Moc thoi gian: {formatTime(activeSentence.startSec) ?? "--:--"} - {formatTime(activeSentence.endSec) ?? "--:--"}
-          </p>
-        )}
+        {((typeof activeSentenceWithBookmark.startSec === "number") ||
+          (typeof activeSentenceWithBookmark.endSec === "number")) && (
+            <p className="mt-1 text-sm text-[#33545d]">
+              Moc thoi gian: {formatTime(activeSentenceWithBookmark.startSec) ?? "--:--"} - {formatTime(activeSentenceWithBookmark.endSec) ?? "--:--"}
+            </p>
+          )}
 
         {/* Audio bar: chỉ play/pause cho speechSynthesis */}
         <div className="mt-5 flex items-center gap-3">
@@ -288,44 +388,49 @@ export function DictationTrainer({ sentences: initialSentences, initialHistory =
           >
             Câu tiếp theo
           </button>
+          <button
+            type="button"
+            onClick={() => {
+              if (typeof window !== 'undefined' && sentences.length > 0) {
+                window.localStorage.setItem(localStorageKey, String(activeIndex));
+                window.alert('Đã lưu tiến độ!');
+              }
+            }}
+            className="cursor-pointer rounded-xl border border-green-600 px-4 py-2 font-semibold text-green-700 transition hover:bg-green-100"
+          >
+            Lưu tiến độ
+          </button>
         </div>
 
         {showAnswer ? (
           <div className="mt-4 space-y-3 rounded-xl bg-[#f3faf9] p-4">
             <p className="font-semibold text-[#17363f]">{activeSentence.text}</p>
-            {/* Dịch câu */}
-            {analysis?.translation && (
+            {/* Nếu có lỗi từ Gemini hoặc lỗi parse, show rõ lỗi và chi tiết */}
+            {analysis?.error && (
+              <div className="text-xs text-red-600">
+                Lỗi phân tích: {analysis.error}
+              </div>
+            )}
+            {/* Nghĩa toàn câu */}
+            {analysis?.meaning && (
               <div className="border-t border-[#d0e3e1] pt-3">
                 <p className="text-sm text-[#17363f]">
-                  <span className="font-semibold">Dịch nghĩa:</span> {analysis.translation}
+                  <span className="font-semibold">Nghĩa toàn câu:</span> {analysis.meaning}
                 </p>
               </div>
             )}
             {/* Từ vựng */}
-            {analysis?.vocabulary && analysis.vocabulary.length > 0 && (
+            {Array.isArray(analysis?.vocabulary) && analysis.vocabulary.length > 0 && (
               <div>
                 <p className="text-xs text-[#0f3f42] font-semibold mb-1">📚 Từ vựng:</p>
                 <ul className="text-xs text-[#0f3f42] list-disc ml-5">
-                  {analysis.vocabulary.map((v, i) => (
-                    <li key={i}><span className="font-bold">{v.word}</span>: {v.meaning}</li>
-                  ))}
+                  {analysis.vocabulary.map((v, i) =>
+                    typeof v === 'object' && v !== null && 'word' in v && 'meaning' in v ? (
+                      <li key={i}><span className="font-bold">{v.word}</span>: {v.meaning}</li>
+                    ) : null
+                  )}
                 </ul>
               </div>
-            )}
-            {/* Ngữ pháp */}
-            {analysis?.grammar && analysis.grammar.length > 0 && (
-              <div>
-                <p className="text-xs text-[#0f3f42] font-semibold mb-1">📖 Ngữ pháp:</p>
-                <ul className="text-xs text-[#0f3f42] list-disc ml-5">
-                  {analysis.grammar.map((g, i) => (
-                    <li key={i}><span className="font-bold">{g.pattern}</span>: {g.explanation}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
-            {/* Nếu có lỗi */}
-            {analysis?.error && (
-              <div className="text-xs text-red-600">{analysis.error}</div>
             )}
             {/* Nếu không có dữ liệu */}
             {!analysis && analyzing && (
@@ -357,10 +462,20 @@ export function DictationTrainer({ sentences: initialSentences, initialHistory =
         {feedback ? <p className="mt-3 text-sm font-medium text-[#1f4d59]">{feedback}</p> : null}
         {wordReveal && (
           <div className="mt-4 p-3 rounded-xl bg-[#f3faf9] border border-[#d0e3e1]">
-            
-            {wordReveal.map((w, i) =>
-              w === '***' ? <span key={i} className="font-bold text-gray-400">*** </span> : <span key={i} className="font-bold text-green-700">{w} </span>
-            )}
+            {wordReveal.map((w, i) => {
+              if (
+                typeof w === 'object' &&
+                w !== null &&
+                'word' in w &&
+                typeof (w as { word: unknown }).word === 'string'
+              ) {
+                return <span key={i} className="font-bold text-green-700">{(w as { word: string }).word} </span>;
+              }
+              if (w === '***') {
+                return <span key={i} className="font-bold text-gray-400">*** </span>;
+              }
+              return <span key={i} className="font-bold text-green-700">{w} </span>;
+            })}
           </div>
         )}
       </section>

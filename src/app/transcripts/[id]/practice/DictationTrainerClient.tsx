@@ -7,6 +7,7 @@ type Sentence = {
   vietnameseMean?: string;
   vocabularyNote?: string;
   grammarNote?: string;
+  bookmarked?: boolean;
 };
 export default function DictationTrainerClient({ sentences }: { sentences: Sentence[] }) {
   return <DictationTrainer sentences={sentences} />;

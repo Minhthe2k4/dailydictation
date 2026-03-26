@@ -86,6 +86,8 @@ model Sentence {
   createdAt       DateTime  @default(now())
   attempts        Attempt[]
 
+  bookmarked      Boolean   @default(false)
+
   transcript      Transcript? @relation(fields: [transcriptId], references: [id], onDelete: Cascade)
 
   @@index([transcriptId])

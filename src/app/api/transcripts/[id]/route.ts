@@ -32,6 +32,7 @@ export async function GET(
           vietnameseMean: true,
           vocabularyNote: true,
           grammarNote: true,
+          bookmarked: true,
         },
       },
     },
