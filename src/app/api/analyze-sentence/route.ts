@@ -18,7 +18,7 @@ export async function POST(req: NextRequest) {
     .filter(Boolean);
 
   // Trả về danh sách từ vựng, tra nghĩa từ điển nếu có
-  const vocabulary = words.map((word) => ({
+  const vocabulary = words.map((word: string) => ({
     word,
     meaning: koViDict[word] || ""
   }));
