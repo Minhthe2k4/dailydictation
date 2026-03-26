@@ -25,7 +25,7 @@ export async function POST(req: NextRequest) {
 
   // Demo: translation và grammar giữ nguyên mẫu
   // Dịch nghĩa cả câu: ghép nghĩa các từ nếu có, nếu không thì trả về chuỗi rỗng
-  const translation = vocabulary.map(v => v.meaning || v.word).join(" ");
+  const translation = vocabulary.map((v: { word: string; meaning: string }) => v.meaning || v.word).join(" ");
 
   const result = {
     translation,
