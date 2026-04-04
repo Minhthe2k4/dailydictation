@@ -28,12 +28,12 @@ export default function TranscriptListClient({ transcripts }: { transcripts: Tra
   if (transcripts.length === 0) {
     return (
       <div className="bg-white rounded-3xl shadow-2xl p-12 text-center">
-        <p className="text-gray-600 text-lg mb-6">Chưa có kịch bản nào. Hãy tạo mới để bắt đầu luyện nghe!</p>
+        <p className="text-gray-600 text-lg mb-6">Chưa có bài luyện nào. Hãy thêm một video để bắt đầu luyện nghe!</p>
         <Link
           href="/transcripts/upload"
           className="inline-block bg-gradient-to-r from-purple-600 to-pink-600 text-white font-bold py-3 px-8 rounded-lg hover:shadow-lg transition"
         >
-          ➕ Tải lên kịch bản đầu tiên
+          ➕ Thêm video đầu tiên
         </Link>
       </div>
     );

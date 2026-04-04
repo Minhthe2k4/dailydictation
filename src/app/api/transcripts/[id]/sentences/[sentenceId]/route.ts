@@ -28,14 +28,27 @@ export async function PUT(
     return NextResponse.json({ message: "Forbidden" }, { status: 403 });
   }
 
-  const body = (await req.json()) as { text?: string };
-  if (!body.text || !body.text.trim()) {
-    return NextResponse.json({ message: "Text required" }, { status: 400 });
+  const body = (await req.json()) as {
+    text?: string;
+    startSec?: number | null;
+    endSec?: number | null;
+  };
+
+  const hasText = typeof body.text === "string" && body.text.trim().length > 0;
+  const hasStart = typeof body.startSec === "number" && Number.isFinite(body.startSec);
+  const hasEnd = typeof body.endSec === "number" && Number.isFinite(body.endSec);
+
+  if (!hasText && !hasStart && !hasEnd) {
+    return NextResponse.json({ message: "Nothing to update" }, { status: 400 });
   }
 
   const updated = await prisma.sentence.update({
     where: { id: sentenceId },
-    data: { text: body.text.trim() },
+    data: {
+      ...(hasText ? { text: body.text!.trim() } : {}),
+      ...(hasStart ? { startSec: Number(body.startSec!.toFixed(2)) } : {}),
+      ...(hasEnd ? { endSec: Number(body.endSec!.toFixed(2)) } : {}),
+    },
     select: {
       id: true,
       text: true,

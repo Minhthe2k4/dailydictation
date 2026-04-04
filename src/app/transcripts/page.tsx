@@ -40,7 +40,7 @@ export default async function TranscriptsPage() {
     <div className="min-h-screen bg-gradient-to-br from-blue-600 via-purple-600 to-pink-600 p-6">
       <div className="max-w-4xl mx-auto">
         <div className="flex items-center justify-between mb-8">
-          <h1 className="text-4xl font-bold text-white">📚 Quản lý Script</h1>
+          <h1 className="text-4xl font-bold text-white">📚 Quản lý bài luyện</h1>
           <Link
             href="/"
             className="text-white hover:underline text-sm font-semibold"
@@ -54,7 +54,7 @@ export default async function TranscriptsPage() {
             href="/transcripts/upload"
             className="block bg-white rounded-3xl shadow-lg p-6 hover:shadow-xl transition text-center font-bold text-lg text-purple-600"
           >
-            ➕ Thêm Script mới
+            ➕ Thêm từ YouTube
           </Link>
         </div>
 

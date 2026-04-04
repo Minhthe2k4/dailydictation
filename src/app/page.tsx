@@ -35,19 +35,11 @@ export default async function Home() {
 
             <div className="mt-8 flex flex-wrap gap-3">
               <Link
-                href={session?.user?.id ? "/dashboard" : "#"}
+                href={session?.user?.id ? "/transcripts" : "#"}
                 className="rounded-xl bg-[#f1893c] px-5 py-3 text-sm font-bold text-white shadow-lg transition hover:-translate-y-0.5 hover:bg-[#de7a31]"
               >
-                {session?.user?.id ? "Vào phòng luyện tập" : "Đăng nhập để bắt đầu"}
+                {session?.user?.id ? "Bắt đầu luyện nghe" : "Đăng nhập để bắt đầu"}
               </Link>
-              {session?.user?.id && (
-                <Link
-                  href="/transcripts"
-                  className="rounded-xl border border-[#0f3f42] px-5 py-3 text-sm font-bold text-[#0f3f42] shadow-lg transition hover:-translate-y-0.5 hover:bg-[#f3faf9]"
-                >
-                  📚 Kịch bản của tôi
-                </Link>
-              )}
               <span className="rounded-xl border border-[#0f3f42] px-5 py-3 text-sm font-semibold text-[#0f3f42]">
                 Giọng đọc: ko-KR
               </span>

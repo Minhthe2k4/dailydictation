@@ -3,11 +3,16 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import DictationTrainerClient from "./DictationTrainerClient";
+import YouTubePracticeClient from "./YouTubePracticeClient";
+import { extractYoutubeVideoId } from "@/lib/youtube";
 
 interface Sentence {
   id: string;
   text: string;
   level: string;
+  segmentOrder?: number;
+  startSec?: number;
+  endSec?: number;
   vietnameseMean?: string;
   vocabularyNote?: string;
   grammarNote?: string;
@@ -18,6 +23,7 @@ interface TranscriptData {
   id: string;
   title: string;
   level: string;
+  sourceUrl?: string | null;
   sentences: Sentence[];
 }
 
@@ -81,6 +87,8 @@ export default function PracticeTranscriptClient({ id }: { id: string }) {
     );
   }
 
+  const hasYoutubeSource = Boolean(extractYoutubeVideoId(transcript.sourceUrl ?? ""));
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-600 via-purple-600 to-pink-600 p-6">
       <div className="max-w-6xl mx-auto">
@@ -98,7 +106,11 @@ export default function PracticeTranscriptClient({ id }: { id: string }) {
           <p className="text-gray-600">{transcript.sentences.length} câu để luyện tập</p>
         </div>
 
-        <DictationTrainerClient sentences={transcript.sentences} />
+        {hasYoutubeSource ? (
+          <YouTubePracticeClient transcript={transcript} />
+        ) : (
+          <DictationTrainerClient sentences={transcript.sentences} />
+        )}
       </div>
     </div>
   );

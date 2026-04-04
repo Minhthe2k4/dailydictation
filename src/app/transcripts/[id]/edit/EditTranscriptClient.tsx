@@ -20,6 +20,7 @@ interface TranscriptData {
   title: string;
   editedTranscript: string;
   level: string;
+  sourceUrl?: string | null;
   sentences: Sentence[];
 }
 
@@ -35,8 +36,30 @@ export default function EditTranscriptClient({ id }: { id: string }) {
   // Edit sentence state
   const [editingSentenceId, setEditingSentenceId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
+  const [editingStartSec, setEditingStartSec] = useState("");
+  const [editingEndSec, setEditingEndSec] = useState("");
   const [savingEdit, setSavingEdit] = useState(false);
   const [editError, setEditError] = useState("");
+  const [fixingTimeframes, setFixingTimeframes] = useState(false);
+  const [previewSentenceId, setPreviewSentenceId] = useState<string | null>(null);
+
+  const getYoutubeVideoId = (sourceUrl?: string | null) => {
+    const url = sourceUrl ?? "";
+    const patterns = [
+      /(?:youtube\.com\/watch\?v=|youtu\.be\/)([a-zA-Z0-9_-]+)/,
+      /youtube\.com\/embed\/([a-zA-Z0-9_-]+)/,
+      /^([a-zA-Z0-9_-]{11})$/,
+    ];
+
+    for (const pattern of patterns) {
+      const match = url.match(pattern);
+      if (match) {
+        return match[1];
+      }
+    }
+
+    return null;
+  };
   async function handlePunctuate() {
     setPunctuating(true);
     setError("");
@@ -70,6 +93,45 @@ export default function EditTranscriptClient({ id }: { id: string }) {
     return `${mm}:${ss}`;
   };
 
+  const parseTimeInput = (value: string) => {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+
+    const parsed = Number(trimmed);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+
+  const estimateDuration = (text: string) => {
+    const lengthBased = text.trim().length / 12;
+    return Math.min(6, Math.max(1.2, Number(lengthBased.toFixed(2))));
+  };
+
+  const activePreviewSentence = transcript?.sentences.find((sentence) => sentence.id === previewSentenceId) ?? transcript?.sentences[0] ?? null;
+  const previewVideoId = getYoutubeVideoId(transcript?.sourceUrl);
+  const previewSrc = previewVideoId
+    ? (() => {
+        const params = new URLSearchParams({
+          autoplay: "1",
+          rel: "0",
+          modestbranding: "1",
+          playsinline: "1",
+          enablejsapi: "1",
+        });
+
+        if (activePreviewSentence?.startSec !== undefined) {
+          params.set("start", String(Math.max(0, Math.floor(activePreviewSentence.startSec))));
+        }
+
+        if (activePreviewSentence?.endSec !== undefined && activePreviewSentence.endSec > (activePreviewSentence.startSec ?? 0)) {
+          params.set("end", String(Math.ceil(activePreviewSentence.endSec)));
+        }
+
+        return `https://www.youtube.com/embed/${previewVideoId}?${params.toString()}`;
+      })()
+    : null;
+
   useEffect(() => {
     async function fetchTranscript() {
       try {
@@ -78,6 +140,7 @@ export default function EditTranscriptClient({ id }: { id: string }) {
         const data = await res.json();
         setTranscript(data.transcript);
         setEditedText(data.transcript.editedTranscript);
+        setPreviewSentenceId(data.transcript.sentences?.[0]?.id ?? null);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Unknown error");
       } finally {
@@ -175,6 +238,61 @@ export default function EditTranscriptClient({ id }: { id: string }) {
     }
   }
 
+  async function handleAutoFixTimeframes() {
+    if (!transcript?.sentences.length) {
+      return;
+    }
+
+    setFixingTimeframes(true);
+    setError("");
+
+    try {
+      const sorted = [...transcript.sentences].sort((left, right) => {
+        const leftOrder = left.segmentOrder ?? 0;
+        const rightOrder = right.segmentOrder ?? 0;
+        if (leftOrder !== rightOrder) {
+          return leftOrder - rightOrder;
+        }
+        return left.id.localeCompare(right.id);
+      });
+
+      let cursor = sorted.find((sentence) => typeof sentence.startSec === "number" && sentence.startSec >= 0)?.startSec ?? 0;
+
+      for (let index = 0; index < sorted.length; index += 1) {
+        const sentence = sorted[index];
+        const nextSentence = sorted[index + 1];
+        const estimatedDuration = estimateDuration(sentence.text);
+        const startSec = Number(cursor.toFixed(2));
+        const nextKnownStart = typeof nextSentence?.startSec === "number" ? nextSentence.startSec : null;
+        const maxEnd = nextKnownStart !== null ? Math.max(startSec + 0.3, nextKnownStart - 0.05) : startSec + estimatedDuration;
+        const endSec = Number(Math.max(startSec + 0.3, maxEnd).toFixed(2));
+
+        const res = await fetch(`/api/transcripts/${id}/sentences/${sentence.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ startSec, endSec }),
+        });
+
+        if (!res.ok) {
+          const payload = (await res.json().catch(() => null)) as { message?: string } | null;
+          throw new Error(payload?.message ?? "Failed to update timeframes");
+        }
+
+        cursor = endSec + 0.12;
+      }
+
+      const getRes = await fetch(`/api/transcripts/${id}`);
+      if (getRes.ok) {
+        const updated = await getRes.json();
+        setTranscript(updated.transcript);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unknown error");
+    } finally {
+      setFixingTimeframes(false);
+    }
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-600 via-purple-600 to-pink-600 p-6 flex items-center justify-center">
@@ -203,11 +321,45 @@ export default function EditTranscriptClient({ id }: { id: string }) {
           ← Back to Transcripts
         </Link>
 
-        <div className="grid grid-cols-1 lg:grid-cols-[1fr_0.6fr] gap-6">
+        <div className="grid grid-cols-1 lg:grid-cols-[1.05fr_0.95fr] gap-6">
           {/* Editor */}
           <div className="bg-white rounded-3xl shadow-2xl p-8">
             <h1 className="text-3xl font-bold text-gray-800 mb-2">{transcript.title}</h1>
             <p className="text-gray-600 mb-6 capitalize">Level: {transcript.level}</p>
+
+            <div className="mb-6 rounded-3xl border border-slate-200 bg-slate-50 p-4">
+              <div className="flex items-center justify-between gap-3 mb-3">
+                <div>
+                  <p className="text-xs uppercase tracking-[0.3em] text-slate-400">YouTube preview</p>
+                  <h2 className="mt-1 text-lg font-bold text-slate-900">
+                    {activePreviewSentence ? `Câu ${activePreviewSentence.segmentOrder ?? transcript.sentences.indexOf(activePreviewSentence) + 1}` : "Chưa có câu để xem"}
+                  </h2>
+                </div>
+                {activePreviewSentence ? (
+                  <div className="text-right text-xs text-slate-500">
+                    <p>{formatTime(activePreviewSentence.startSec)} - {formatTime(activePreviewSentence.endSec)}</p>
+                    <p className="mt-1 max-w-xs truncate">{activePreviewSentence.text}</p>
+                  </div>
+                ) : null}
+              </div>
+
+              {previewSrc ? (
+                <div className="overflow-hidden rounded-2xl bg-black shadow-lg">
+                  <iframe
+                    key={`${activePreviewSentence?.id ?? "preview"}-${activePreviewSentence?.startSec ?? 0}-${activePreviewSentence?.endSec ?? 0}`}
+                    src={previewSrc}
+                    title="YouTube preview"
+                    className="aspect-video w-full"
+                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                    allowFullScreen
+                  />
+                </div>
+              ) : (
+                <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-6 text-sm text-slate-500">
+                  Chưa có link YouTube hợp lệ để preview.
+                </div>
+              )}
+            </div>
 
             {error && (
               <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-lg mb-6">
@@ -251,6 +403,13 @@ export default function EditTranscriptClient({ id }: { id: string }) {
               >
                 {punctuating ? "AI Đang chấm câu..." : "✨ AI Chấm câu"}
               </button>
+              <button
+                onClick={handleAutoFixTimeframes}
+                disabled={fixingTimeframes || transcript.sentences.length === 0}
+                className="flex-1 bg-orange-600 text-white font-bold py-3 rounded-lg hover:bg-orange-700 transition disabled:opacity-50"
+              >
+                {fixingTimeframes ? "Đang sửa timeframe..." : "🕒 Auto-fix timeframe"}
+              </button>
             </div>
 
             {/* Practice Button */}
@@ -258,7 +417,7 @@ export default function EditTranscriptClient({ id }: { id: string }) {
               href={`/transcripts/${id}/practice`}
               className="block w-full bg-gradient-to-r from-purple-600 to-pink-600 text-white font-bold py-3 rounded-lg hover:shadow-lg transition text-center"
             >
-              ▶️ Start Practice
+              ▶️ Sang luyện tập với script đã sửa
             </Link>
           </div>
 
@@ -277,28 +436,51 @@ export default function EditTranscriptClient({ id }: { id: string }) {
                     <div className="flex items-start justify-between gap-3 mb-2">
                       {editingSentenceId === sent.id ? (
                         <>
-                          <input
-                            className="flex-1 border rounded px-2 py-1 text-gray-900"
-                            value={editingText}
-                            onChange={e => setEditingText(e.target.value)}
-                            disabled={savingEdit}
-                          />
+                          <div className="flex-1 space-y-2">
+                            <input
+                              className="w-full border rounded px-2 py-1 text-gray-900"
+                              value={editingText}
+                              onChange={e => setEditingText(e.target.value)}
+                              disabled={savingEdit}
+                            />
+                            <div className="grid grid-cols-2 gap-2">
+                              <input
+                                className="w-full border rounded px-2 py-1 text-gray-900 text-xs"
+                                value={editingStartSec}
+                                onChange={(e) => setEditingStartSec(e.target.value)}
+                                disabled={savingEdit}
+                                placeholder="startSec"
+                              />
+                              <input
+                                className="w-full border rounded px-2 py-1 text-gray-900 text-xs"
+                                value={editingEndSec}
+                                onChange={(e) => setEditingEndSec(e.target.value)}
+                                disabled={savingEdit}
+                                placeholder="endSec"
+                              />
+                            </div>
+                          </div>
                           <button
                             type="button"
                             onClick={async () => {
                               setSavingEdit(true);
                               setEditError("");
                               try {
+                                const startSec = parseTimeInput(editingStartSec);
+                                const endSec = parseTimeInput(editingEndSec);
                                 const res = await fetch(`/api/transcripts/${id}/sentences/${sent.id}`, {
                                   method: "PUT",
                                   headers: { "Content-Type": "application/json" },
-                                  body: JSON.stringify({ text: editingText }),
+                                  body: JSON.stringify({
+                                    text: editingText,
+                                    ...(startSec !== null ? { startSec } : {}),
+                                    ...(endSec !== null ? { endSec } : {}),
+                                  }),
                                 });
                                 if (!res.ok) {
                                   const payload = (await res.json().catch(() => null)) as { message?: string } | null;
                                   throw new Error(payload?.message ?? "Failed to update sentence");
                                 }
-                                // Refresh transcript after edit
                                 const getRes = await fetch(`/api/transcripts/${id}`);
                                 if (getRes.ok) {
                                   const updated = await getRes.json();
@@ -332,10 +514,24 @@ export default function EditTranscriptClient({ id }: { id: string }) {
                           </p>
                           <button
                             type="button"
-                            onClick={() => { setEditingSentenceId(sent.id); setEditingText(sent.text); setEditError(""); }}
+                            onClick={() => {
+                              setEditingSentenceId(sent.id);
+                              setEditingText(sent.text);
+                              setEditingStartSec(typeof sent.startSec === "number" ? String(sent.startSec) : "");
+                              setEditingEndSec(typeof sent.endSec === "number" ? String(sent.endSec) : "");
+                              setEditError("");
+                              setPreviewSentenceId(sent.id);
+                            }}
                             className="shrink-0 rounded-md border border-blue-300 px-2 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-50 ml-2"
                           >
                             Edit
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setPreviewSentenceId(sent.id)}
+                            className="shrink-0 rounded-md border border-cyan-300 px-2 py-1 text-xs font-semibold text-cyan-700 hover:bg-cyan-50 ml-1"
+                          >
+                            Tua đến đây
                           </button>
                           <button
                             type="button"

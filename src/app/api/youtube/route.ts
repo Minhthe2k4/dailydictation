@@ -2,24 +2,7 @@ import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import * as YoutubeTranscriptModule from "youtube-transcript";
-
-// Extract video ID from YouTube URL
-function extractVideoId(url: string): string | null {
-  const patterns = [
-    /(?:youtube\.com\/watch\?v=|youtu\.be\/)([a-zA-Z0-9_-]+)/,
-    /youtube\.com\/embed\/([a-zA-Z0-9_-]+)/,
-    /^([a-zA-Z0-9_-]{11})$/,
-  ];
-
-  for (const pattern of patterns) {
-    const match = url.match(pattern);
-    if (match) {
-      return match[1];
-    }
-  }
-
-  return null;
-}
+import { extractYoutubeVideoId } from "@/lib/youtube";
 
 type TrackInfo = {
   langCode: string;
@@ -40,6 +23,10 @@ type TimedSegment = {
   segmentOrder: number;
 };
 
+type ExpandedChunk = SubtitleChunk & {
+  hasSentenceBoundary: boolean;
+};
+
 function normalizeToSec(value: number): number {
   if (!Number.isFinite(value) || value < 0) {
     return 0;
@@ -47,8 +34,131 @@ function normalizeToSec(value: number): number {
   return value > 1000 ? value / 1000 : value;
 }
 
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+function pickTimeValue(...candidates: unknown[]): number | null {
+  for (const candidate of candidates) {
+    const parsed = toFiniteNumber(candidate);
+    if (parsed !== null) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
 function normalizeText(value: string): string {
   return value.replace(/\s+/g, " ").trim();
+}
+
+function stripTrailingQuotes(value: string): string {
+  return value.replace(/["'”’)}\]]+$/g, "").trim();
+}
+
+function isKoreanSentenceEnding(text: string): boolean {
+  const normalized = stripTrailingQuotes(normalizeText(text));
+  if (!normalized) {
+    return false;
+  }
+
+  if (/[.!?。！？]$/.test(normalized)) {
+    return true;
+  }
+
+  const lastToken = normalized.split(/\s+/).pop() ?? normalized;
+  const endings = [
+    /(?:습니다|습니까|습니다만|입니까|입니다|입니다만|합니다|합니까|했습니다|하겠습니다|하죠|하네요|하잖아요|하잖아|하거든요|하거든|하니까|하군요|해요|했어요|예요|이에요|네요|죠|지요|군요|거든요|더라고요|더라|잖아요|잖아|네요|구나|네)$/,
+    /(?:다|다네요|다니까|다니|다죠|다네|다며|라네요|라니까|라니|라죠|라네)$/,
+    /(?:까|까요|ㄹ까|을까|나|나요|니|니까|는가|인가|던가)$/,
+  ];
+
+  return endings.some((pattern) => pattern.test(lastToken));
+}
+
+function hasStrongKoreanBoundary(text: string): boolean {
+  const normalized = normalizeText(text);
+  if (!normalized) {
+    return false;
+  }
+
+  const tokenCount = normalized.split(/\s+/).length;
+  const characterCount = normalized.length;
+
+  return isKoreanSentenceEnding(normalized) || (tokenCount >= 4 && characterCount >= 18 && /[ㄱ-ㅎ가-힣]/.test(normalized));
+}
+
+function splitIntoSentenceFragments(text: string): string[] {
+  const normalized = normalizeText(text);
+  if (!normalized) {
+    return [];
+  }
+
+  const sentenceSegments = typeof Intl !== "undefined" && "Segmenter" in Intl
+    ? Array.from(
+        new Intl.Segmenter("ko", { granularity: "sentence" }).segment(normalized),
+        (part) => part.segment.trim()
+      ).filter(Boolean)
+    : [];
+
+  if (sentenceSegments.length > 1) {
+    return sentenceSegments;
+  }
+
+  const regexFragments = normalized.match(/[^.!?。！？\n]+[.!?。！？]?/g);
+  if (regexFragments && regexFragments.length > 1) {
+    return regexFragments.map((fragment) => fragment.trim()).filter(Boolean);
+  }
+
+  return [normalized];
+}
+
+function expandChunkIntoFragments(chunk: SubtitleChunk): ExpandedChunk[] {
+  const fragments = splitIntoSentenceFragments(chunk.text);
+  if (fragments.length <= 1) {
+    return [
+      {
+        ...chunk,
+        text: normalizeText(chunk.text),
+        hasSentenceBoundary: hasStrongKoreanBoundary(chunk.text),
+      },
+    ];
+  }
+
+  const totalChars = fragments.reduce((sum, fragment) => sum + fragment.length, 0) || fragments.length;
+  const totalDuration = Math.max(chunk.endSec - chunk.startSec, fragments.length * 0.35);
+  const expanded: ExpandedChunk[] = [];
+  let cursor = chunk.startSec;
+
+  fragments.forEach((fragment, index) => {
+    const weight = fragment.length / totalChars;
+    const estimatedDuration = index === fragments.length - 1
+      ? Math.max(0.3, chunk.endSec - cursor)
+      : Math.max(0.3, totalDuration * weight);
+    const nextEnd = index === fragments.length - 1
+      ? chunk.endSec
+      : Math.min(chunk.endSec, Number((cursor + estimatedDuration).toFixed(2)));
+
+    expanded.push({
+      text: fragment,
+      startSec: Number(cursor.toFixed(2)),
+      endSec: Number(Math.max(nextEnd, cursor + 0.3).toFixed(2)),
+      hasSentenceBoundary: hasStrongKoreanBoundary(fragment),
+    });
+
+    cursor = Math.max(nextEnd, cursor + 0.3);
+  });
+
+  return expanded;
 }
 
 function buildTimedSegments(chunks: SubtitleChunk[]): TimedSegment[] {
@@ -57,9 +167,11 @@ function buildTimedSegments(chunks: SubtitleChunk[]): TimedSegment[] {
   }
 
   const segments: TimedSegment[] = [];
+  const expandedChunks = chunks.flatMap((chunk) => expandChunkIntoFragments(chunk));
+
   let currentText = "";
-  let currentStart = chunks[0].startSec;
-  let currentEnd = chunks[0].endSec;
+  let currentStart = expandedChunks[0].startSec;
+  let currentEnd = expandedChunks[0].endSec;
 
   const flush = () => {
     const text = normalizeText(currentText);
@@ -78,33 +190,53 @@ function buildTimedSegments(chunks: SubtitleChunk[]): TimedSegment[] {
     currentText = "";
   };
 
-  for (const chunk of chunks) {
+  for (const chunk of expandedChunks) {
     const chunkText = normalizeText(chunk.text);
     if (!chunkText) {
       continue;
     }
 
-    if (!currentText) {
+    const gap = chunk.startSec - currentEnd;
+    const shouldStartNewSegment =
+      !currentText ||
+      gap > 0.55 ||
+      currentText.length >= 55 ||
+      (currentEnd - currentStart) >= 4.5 ||
+      chunk.hasSentenceBoundary;
+
+    if (shouldStartNewSegment) {
+      if (currentText) {
+        flush();
+      }
+
       currentStart = chunk.startSec;
       currentEnd = chunk.endSec;
       currentText = chunkText;
-    } else {
-      currentText = `${currentText} ${chunkText}`;
-      currentEnd = chunk.endSec;
+      continue;
     }
 
-    const duration = currentEnd - currentStart;
-    const hasSentenceEnd = /[.!?。！？]$/.test(chunkText);
-    const tooLongText = currentText.length >= 90;
-    const tooLongDuration = duration >= 8;
-
-    if (hasSentenceEnd || tooLongText || tooLongDuration) {
-      flush();
-    }
+    currentText = `${currentText} ${chunkText}`;
+    currentEnd = chunk.endSec;
   }
 
   if (currentText) {
     flush();
+  }
+
+  // Keep segment timeline stable and non-overlapping.
+  for (let index = 0; index < segments.length - 1; index += 1) {
+    const current = segments[index];
+    const next = segments[index + 1];
+    const maxEnd = Math.max(current.startSec + 0.2, next.startSec - 0.02);
+    if (current.endSec > maxEnd) {
+      current.endSec = Number(maxEnd.toFixed(2));
+    }
+  }
+
+  for (const segment of segments) {
+    if (segment.endSec <= segment.startSec) {
+      segment.endSec = Number((segment.startSec + 0.25).toFixed(2));
+    }
   }
 
   return segments;
@@ -204,6 +336,28 @@ function textFromChunks(chunks: SubtitleChunk[]): string {
     .trim();
 }
 
+async function fetchYoutubeTitle(sourceUrl: string): Promise<string | null> {
+  try {
+    const res = await fetch(
+      `https://www.youtube.com/oembed?url=${encodeURIComponent(sourceUrl)}&format=json`,
+      {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        },
+      }
+    );
+
+    if (!res.ok) {
+      return null;
+    }
+
+    const data = (await res.json()) as { title?: string };
+    return typeof data.title === "string" ? data.title.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
 async function tryFetchTranscript(url: string): Promise<SubtitleChunk[]> {
   const res = await fetch(url, {
     headers: {
@@ -241,7 +395,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ message: "YouTube URL required" }, { status: 400 });
   }
 
-  const videoId = extractVideoId(body.youtubeUrl);
+  const videoId = extractYoutubeVideoId(body.youtubeUrl);
   if (!videoId) {
     return NextResponse.json(
       { message: "Invalid YouTube URL" },
@@ -270,25 +424,52 @@ export async function POST(req: Request) {
         transcriptChunks = await fetchTranscriptFn(videoId);
       }
 
-      const timedChunks: SubtitleChunk[] = transcriptChunks
-        .map((item) => {
-          const startSec = normalizeToSec((item as { offset?: number }).offset ?? 0);
-          const durationSec = normalizeToSec((item as { duration?: number }).duration ?? 0);
-          const text = normalizeText(item.text ?? "");
-          return {
-            text,
-            startSec,
-            endSec: Number((startSec + Math.max(durationSec, 0.3)).toFixed(2)),
-          };
-        })
-        .filter((item) => item.text.length > 0);
+      const timedChunks: SubtitleChunk[] = [];
+      let fallbackStart = 0;
+
+      for (const item of transcriptChunks) {
+        const startRaw = pickTimeValue(
+          (item as { offset?: number }).offset,
+          (item as { start?: number }).start,
+          (item as { startSec?: number }).startSec,
+          (item as { startTime?: number }).startTime,
+          (item as { offsetMs?: number }).offsetMs,
+          (item as { startMs?: number }).startMs
+        );
+        const durationRaw = pickTimeValue(
+          (item as { duration?: number }).duration,
+          (item as { dur?: number }).dur,
+          (item as { durationSec?: number }).durationSec,
+          (item as { durationMs?: number }).durationMs,
+          (item as { dDurationMs?: number }).dDurationMs
+        );
+
+        const text = normalizeText(item.text ?? "");
+        if (!text) {
+          continue;
+        }
+
+        const startSec = normalizeToSec(startRaw ?? fallbackStart);
+        const durationSec = normalizeToSec(durationRaw ?? 0.6);
+        const endSec = Number((startSec + Math.max(durationSec, 0.3)).toFixed(2));
+
+        timedChunks.push({
+          text,
+          startSec,
+          endSec,
+        });
+
+        fallbackStart = endSec;
+      }
 
       const segments = buildTimedSegments(timedChunks);
       const transcript = textFromSegments(segments) || textFromChunks(timedChunks);
 
       if (transcript) {
+        const title = await fetchYoutubeTitle(body.youtubeUrl);
         return NextResponse.json({
           videoId,
+          title,
           transcript,
           segments,
           sourceUrl: body.youtubeUrl,
@@ -370,9 +551,11 @@ export async function POST(req: Request) {
 
     const selectedLanguage =
       koreanTracks[0]?.langCode ?? tracks[0]?.langCode ?? "ko";
+    const title = await fetchYoutubeTitle(body.youtubeUrl);
 
     return NextResponse.json({
       videoId,
+      title,
       transcript,
       segments,
       sourceUrl: body.youtubeUrl,
