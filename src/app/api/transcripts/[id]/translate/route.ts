@@ -34,7 +34,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ message: "Forbidden" }, { status: 403 });
   }
 
-  const vietnamese = translateKoreanToVietnamese(sentence.text);
+  const vietnamese = translateKoreanText(sentence.text);
 
   // Update sentence with translation
   const updated = await prisma.sentence.update({
