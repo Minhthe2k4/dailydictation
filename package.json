@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "prisma generate && next build",
     "start": "next start",
     "lint": "eslint",
     "db:migrate": "prisma migrate dev",
@@ -34,10 +34,6 @@
   "main": "index.js",
   "keywords": [],
   "author": "",
-  "license": "ISC",
-  
-  "scripts": {
-    "build": "prisma generate && next build"
-  }
+  "license": "ISC"
 
 }
