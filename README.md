@@ -3,7 +3,7 @@
 Website luyen nghe chep chinh ta tieng Han, duoc xay dung bang React (Next.js App Router), co:
 
 - Dang nhap/Dang ky voi Google (NextAuth)
-- Luu du lieu vao database SQLite (Prisma)
+- Luu du lieu vao database PostgreSQL (Prisma)
 - Cham diem bai chep tu dong
 - Luu lich su luyen tap theo tung tai khoan
 
@@ -15,10 +15,10 @@ npm install
 
 ## 2. Cau hinh bien moi truong
 
-Tao file `.env` tu `.env.example` va dien thong tin:
+Tao file `.env.local` va dien thong tin:
 
 ```env
-DATABASE_URL="file:./dev.db"
+DATABASE_URL="postgresql://USER:PASSWORD@HOST:5432/DB_NAME?sslmode=require"
 GOOGLE_CLIENT_ID="..."
 GOOGLE_CLIENT_SECRET="..."
 NEXTAUTH_SECRET="mot_chuoi_bi_mat_dai"
@@ -40,6 +40,7 @@ Trong Google Cloud Console:
 
 ```txt
 http://localhost:3000/api/auth/callback/google
+https://dailydictation-rlms.vercel.app/api/auth/callback/google
 ```
 
 3. Copy `Client ID` va `Client Secret` vao `.env`.
@@ -47,7 +48,8 @@ http://localhost:3000/api/auth/callback/google
 ## 4. Tao database
 
 ```bash
-npm run db:migrate -- --name init
+npx prisma generate
+npx prisma db push
 ```
 
 ## 5. Chay project
