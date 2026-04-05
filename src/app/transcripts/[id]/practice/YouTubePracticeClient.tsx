@@ -1,24 +1,7 @@
 ﻿"use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-
-type Sentence = {
-  id: string;
-  text: string;
-  level: string;
-  segmentOrder?: number;
-  startSec?: number;
-  endSec?: number;
-  bookmarked?: boolean;
-};
-
-type TranscriptData = {
-  id: string;
-  title: string;
-  level: string;
-  sourceUrl?: string | null;
-  sentences: Sentence[];
-};
+import { PracticeProgress, PracticeTranscript, PracticeSentence } from "@/types/practice";
 
 declare global {
   interface Window {
@@ -94,7 +77,7 @@ function buildRevealWords(answer: string, typed: string): FullAnswerWord[] {
   }));
 }
 
-export default function YouTubePracticeClient({ transcript }: { transcript: TranscriptData }) {
+export default function YouTubePracticeClient({ transcript, initialProgress = null }: { transcript: PracticeTranscript; initialProgress?: PracticeProgress | null }) {
   const sentences = transcript.sentences;
   const videoId = useMemo(() => {
     const url = transcript.sourceUrl ?? "";
@@ -121,10 +104,20 @@ export default function YouTubePracticeClient({ transcript }: { transcript: Tran
   const repeatLeftRef = useRef(3);
   const isPlayingRef = useRef(false);
   const segmentFinishedRef = useRef(false);
-  const sentencesRef = useRef<Sentence[]>(sentences);
+  const sentencesRef = useRef<PracticeSentence[]>(sentences);
   const manualSentenceChangeRef = useRef(false);
+  const saveTimerRef = useRef<number | null>(null);
 
-  const [activeIndex, setActiveIndex] = useState(0);
+  const initialActiveIndex = useMemo(() => {
+    if (!initialProgress?.sentenceId) {
+      return 0;
+    }
+
+    const matchedIndex = sentences.findIndex((sentence) => sentence.id === initialProgress.sentenceId);
+    return matchedIndex >= 0 ? matchedIndex : 0;
+  }, [initialProgress?.sentenceId, sentences]);
+
+  const [activeIndex, setActiveIndex] = useState(initialActiveIndex);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [playerReady, setPlayerReady] = useState(false);
@@ -141,10 +134,35 @@ export default function YouTubePracticeClient({ transcript }: { transcript: Tran
   const [selectedMeaning, setSelectedMeaning] = useState("");
   const [lookupLoading, setLookupLoading] = useState(false);
   const [error, setError] = useState("");
+  const [jumpToValue, setJumpToValue] = useState("");
 
   const activeSentenceData = sentences[activeIndex] ?? null;
   const activeStart = activeSentenceData?.startSec ?? 0;
   const activeEnd = activeSentenceData?.endSec ?? activeStart + 4;
+
+  async function persistProgress(sentenceId: string | null, value: string) {
+    if (!transcript.id || !sentenceId) {
+      return;
+    }
+
+    await fetch(`/api/transcripts/${transcript.id}/progress`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sentenceId,
+        typedText: value,
+      }),
+    });
+  }
+
+  useEffect(() => {
+    if (initialProgress?.sentenceId) {
+      const matchedIndex = sentences.findIndex((sentence) => sentence.id === initialProgress.sentenceId);
+      if (matchedIndex >= 0) {
+        setActiveIndex(matchedIndex);
+      }
+    }
+  }, [initialProgress?.sentenceId, sentences]);
 
   useEffect(() => {
     sentencesRef.current = sentences;
@@ -171,6 +189,26 @@ export default function YouTubePracticeClient({ transcript }: { transcript: Tran
       setActiveIndex(Math.max(0, sentences.length - 1));
     }
   }, [activeIndex, sentences.length]);
+
+  useEffect(() => {
+    if (!transcript.id || !activeSentenceData) {
+      return;
+    }
+
+    if (saveTimerRef.current !== null) {
+      window.clearTimeout(saveTimerRef.current);
+    }
+
+    saveTimerRef.current = window.setTimeout(() => {
+      void persistProgress(activeSentenceData.id, typedText).catch(() => null);
+    }, 400);
+
+    return () => {
+      if (saveTimerRef.current !== null) {
+        window.clearTimeout(saveTimerRef.current);
+      }
+    };
+  }, [activeSentenceData, transcript.id, typedText]);
 
   useEffect(() => {
     if (!videoId) {
@@ -410,6 +448,7 @@ export default function YouTubePracticeClient({ transcript }: { transcript: Tran
     }
 
     manualSentenceChangeRef.current = true;
+    void persistProgress(activeSentenceData?.id ?? null, typedText).catch(() => null);
     const nextIndex = clampIndex(activeIndex + 1, sentences.length);
     setActiveIndex(nextIndex);
     setCurrentTime(sentences[nextIndex]?.startSec ?? 0);
@@ -425,9 +464,34 @@ export default function YouTubePracticeClient({ transcript }: { transcript: Tran
     }
 
     manualSentenceChangeRef.current = true;
+    void persistProgress(activeSentenceData?.id ?? null, typedText).catch(() => null);
     const nextIndex = clampIndex(activeIndex - 1, sentences.length);
     setActiveIndex(nextIndex);
     setCurrentTime(sentences[nextIndex]?.startSec ?? 0);
+    const player = playerRef.current;
+    if (player && sentences[nextIndex]?.startSec !== undefined) {
+      player.seekTo(sentences[nextIndex].startSec ?? 0, true);
+    }
+  }
+
+  function handleJumpToSentence() {
+    if (sentences.length === 0) {
+      return;
+    }
+
+    const nextIndex = Number.parseInt(jumpToValue, 10) - 1;
+    if (Number.isNaN(nextIndex) || nextIndex < 0 || nextIndex >= sentences.length) {
+      setError(`Vui lòng nhập số từ 1 đến ${sentences.length}.`);
+      return;
+    }
+
+    manualSentenceChangeRef.current = true;
+    void persistProgress(activeSentenceData?.id ?? null, typedText).catch(() => null);
+    setError("");
+    setActiveIndex(nextIndex);
+    setCurrentTime(sentences[nextIndex]?.startSec ?? 0);
+    setJumpToValue("");
+
     const player = playerRef.current;
     if (player && sentences[nextIndex]?.startSec !== undefined) {
       player.seekTo(sentences[nextIndex].startSec ?? 0, true);
@@ -475,6 +539,37 @@ export default function YouTubePracticeClient({ transcript }: { transcript: Tran
         </div>
 
         <div className="mt-5 rounded-[1.5rem] border border-white/10 bg-white/5 p-5 backdrop-blur">
+          <div className="mb-3 flex flex-wrap items-center gap-3 text-sm text-cyan-50/90">
+            <span className="rounded-full bg-white/10 px-3 py-1 font-semibold">
+              Câu {activeIndex + 1}/{sentences.length}
+            </span>
+            <label className="flex items-center gap-2">
+              <span className="text-cyan-50/80">Nhảy đến câu</span>
+              <input
+                type="number"
+                min={1}
+                max={sentences.length}
+                value={jumpToValue}
+                onChange={(event) => setJumpToValue(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    handleJumpToSentence();
+                  }
+                }}
+                className="w-20 rounded-full border border-white/15 bg-white/10 px-3 py-2 text-white outline-none placeholder:text-cyan-50/40"
+                placeholder="Số"
+              />
+            </label>
+            <button
+              type="button"
+              onClick={handleJumpToSentence}
+              className="rounded-full bg-white px-4 py-2 font-semibold text-[#082126] transition hover:bg-cyan-100"
+            >
+              Đi
+            </button>
+          </div>
+
           <div className="flex items-center justify-between gap-3 text-sm text-cyan-50/80">
             <span>{playerReady ? (isPlaying ? "Đang phát" : segmentFinished ? "Đã lặp đủ 3 lần" : "Đã sẵn sàng") : "Đang khởi tạo player..."}</span>
             <span>
@@ -589,6 +684,7 @@ export default function YouTubePracticeClient({ transcript }: { transcript: Tran
                   </div>
                 </div>
               ) : null}
+
             </>
           )}
 

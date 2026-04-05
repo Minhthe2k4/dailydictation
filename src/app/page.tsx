@@ -23,10 +23,10 @@ export default async function Home() {
         <section className="mt-12 grid flex-1 gap-6 lg:grid-cols-[1.1fr_0.9fr]">
           <div className="rounded-3xl bg-white/80 p-8 shadow-2xl backdrop-blur-sm ring-1 ring-black/5">
             <p className="inline-block rounded-full bg-[#0f3f42] px-4 py-1 text-xs font-semibold uppercase tracking-wide text-white">
-              Ứng dụng React + Cơ sở dữ liệu
+              Thế sắp ra được trường rồi......
             </p>
             <h2 className="mt-5 text-4xl font-black leading-tight">
-              Luyện chính tả tiếng Hàn với nhiều cấp độ
+              Luyện nghe chính tả tiếng Hàn
             </h2>
             <p className="mt-4 max-w-xl text-base text-[#32525a]">
               Đăng nhập Google để lưu lịch sử luyện tập, tính điểm tự động và xem tiến độ của bạn

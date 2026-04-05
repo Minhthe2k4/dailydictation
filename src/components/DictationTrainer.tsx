@@ -1,18 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-
-type Sentence = {
-  id: string;
-  text: string;
-  level: string;
-  startSec?: number;
-  endSec?: number;
-  vietnameseMean?: string;
-  vocabularyNote?: string;
-  grammarNote?: string;
-  bookmarked?: boolean;
-};
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { PracticeProgress, PracticeSentence } from "@/types/practice";
 
 type AttemptItem = {
   id: string;
@@ -26,24 +15,44 @@ type AttemptItem = {
 };
 
 type DictationTrainerProps = {
-  sentences: Sentence[];
+  transcriptId?: string;
+  sentences: PracticeSentence[];
   initialHistory?: AttemptItem[];
+  initialProgress?: PracticeProgress | null;
 };
 
-export function DictationTrainer({ sentences: initialSentences, initialHistory = [] }: DictationTrainerProps) {
-  // Audio bar state (phải nằm trong thân hàm component)
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const [audioCurrent, setAudioCurrent] = useState(0);
-  const [audioDuration, setAudioDuration] = useState(0);
+export function DictationTrainer({ transcriptId, sentences: initialSentences, initialHistory = [], initialProgress = null }: DictationTrainerProps) {
   const [audioPlaying, setAudioPlaying] = useState(false);
 
-  const [activeIndex, setActiveIndex] = useState(0);
+  const initialActiveIndex = useMemo(() => {
+    if (!initialProgress?.sentenceId) {
+      return 0;
+    }
+
+    const matchedIndex = initialSentences.findIndex((sentence) => sentence.id === initialProgress.sentenceId);
+    return matchedIndex >= 0 ? matchedIndex : 0;
+  }, [initialProgress?.sentenceId, initialSentences]);
+
+  const [activeIndex, setActiveIndex] = useState(initialActiveIndex);
   const [sentences] = useState(initialSentences);
   // Bookmark state (local optimistic update)
   const [sentencesState, setSentencesState] = useState(sentences);
   useEffect(() => { setSentencesState(sentences); }, [sentences]);
   const [bookmarking, setBookmarking] = useState(false);
   const activeSentenceWithBookmark = useMemo(() => sentencesState[activeIndex], [activeIndex, sentencesState]);
+  const activeSentenceId = activeSentenceWithBookmark?.id ?? null;
+
+  useEffect(() => {
+    if (!initialProgress?.sentenceId) {
+      return;
+    }
+
+    const matchedIndex = sentences.findIndex((sentence) => sentence.id === initialProgress.sentenceId);
+    if (matchedIndex >= 0) {
+      setActiveIndex(matchedIndex);
+    }
+  }, [initialProgress?.sentenceId, sentences]);
+
   async function handleToggleBookmark() {
     if (!activeSentenceWithBookmark) return;
     setBookmarking(true);
@@ -61,35 +70,7 @@ export function DictationTrainer({ sentences: initialSentences, initialHistory =
       setBookmarking(false);
     }
   }
-  const [history, setHistory] = useState(initialHistory);
-
-  // Key for localStorage (unique per transcript if possible)
-  // Use transcript id if available for unique key, fallback to generic
-  const transcriptId = sentences.length > 0 ? sentences[0]?.id?.split('-')[0] || '' : '';
-  const localStorageKey = transcriptId ? `dictation-active-index-${transcriptId}` : 'dictation-active-index';
-
-  // On mount, restore activeIndex from localStorage
-  useEffect(() => {
-    if (typeof window !== 'undefined' && sentences.length > 0) {
-      const saved = window.localStorage.getItem(localStorageKey);
-      if (saved !== null) {
-        const idx = parseInt(saved, 10);
-        if (!isNaN(idx) && idx >= 0 && idx < sentences.length) {
-          setActiveIndex(idx);
-        }
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sentences.length, localStorageKey]);
-
-  // Whenever activeIndex changes, save to localStorage
-  useEffect(() => {
-    if (typeof window !== 'undefined' && sentences.length > 0) {
-      window.localStorage.setItem(localStorageKey, String(activeIndex));
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeIndex, sentences.length, localStorageKey]);
-  const [typedText, setTypedText] = useState("");
+  const [typedText, setTypedText] = useState(initialProgress?.typedText ?? "");
   const [loading, setLoading] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [showAnswer, setShowAnswer] = useState(false);
@@ -104,14 +85,52 @@ export function DictationTrainer({ sentences: initialSentences, initialHistory =
   const [analyzing, setAnalyzing] = useState(false);
   const [isMounted, setIsMounted] = useState(false);
   const [audioRate, setAudioRate] = useState(1);
+  const saveTimerRef = useRef<number | null>(null);
+
+  const persistProgress = useCallback(async (sentenceId: string | null, value: string) => {
+    if (!transcriptId || !sentenceId) {
+      return;
+    }
+
+    await fetch(`/api/transcripts/${transcriptId}/progress`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        sentenceId,
+        typedText: value,
+      }),
+    });
+  }, [transcriptId]);
 
   useEffect(() => {
     setIsMounted(true);
   }, []);
 
+  useEffect(() => {
+    if (!transcriptId || !activeSentenceId || !isMounted) {
+      return;
+    }
+
+    if (saveTimerRef.current !== null) {
+      window.clearTimeout(saveTimerRef.current);
+    }
+
+    saveTimerRef.current = window.setTimeout(() => {
+      void persistProgress(activeSentenceId, typedText).catch(() => null);
+    }, 400);
+
+    return () => {
+      if (saveTimerRef.current !== null) {
+        window.clearTimeout(saveTimerRef.current);
+      }
+    };
+  }, [activeSentenceId, isMounted, persistProgress, transcriptId, typedText]);
+
   const activeSentence = useMemo(() => sentences[activeIndex], [activeIndex, sentences]);
 
-  const formatTime = (seconds?: number) => {
+  const formatTime = (seconds?: number | null) => {
     if (typeof seconds !== "number" || Number.isNaN(seconds)) {
       return null;
     }
@@ -160,13 +179,6 @@ export function DictationTrainer({ sentences: initialSentences, initialHistory =
       setAudioPlaying(false);
     }
   };
-  const resumeAudio = () => {
-    if (typeof window !== "undefined") {
-      window.speechSynthesis.resume();
-      setAudioPlaying(true);
-    }
-  };
-
   const [wordReveal, setWordReveal] = useState<string[] | null>(null);
   const handleSubmit = async () => {
     if (!activeSentence || !typedText.trim()) {
@@ -208,7 +220,6 @@ export function DictationTrainer({ sentences: initialSentences, initialHistory =
       }
 
       const payload = (await response.json()) as { attempt: AttemptItem };
-      setHistory((prev) => [payload.attempt, ...prev].slice(0, 12));
       setFeedback(`Điểm của bạn: ${payload.attempt.score}/100`);
       // setTypedText("");
       setShowAnswer(false);
@@ -222,6 +233,7 @@ export function DictationTrainer({ sentences: initialSentences, initialHistory =
 
   const nextSentence = () => {
     if (!sentences.length) return;
+    void persistProgress(activeSentenceId, typedText).catch(() => null);
     setActiveIndex((prev) => (prev + 1) % sentences.length);
     setTypedText("");
     setFeedback(null);
@@ -388,18 +400,6 @@ export function DictationTrainer({ sentences: initialSentences, initialHistory =
           >
             Câu tiếp theo
           </button>
-          <button
-            type="button"
-            onClick={() => {
-              if (typeof window !== 'undefined' && sentences.length > 0) {
-                window.localStorage.setItem(localStorageKey, String(activeIndex));
-                window.alert('Đã lưu tiến độ!');
-              }
-            }}
-            className="cursor-pointer rounded-xl border border-green-600 px-4 py-2 font-semibold text-green-700 transition hover:bg-green-100"
-          >
-            Lưu tiến độ
-          </button>
         </div>
 
         {showAnswer ? (
@@ -460,6 +460,7 @@ export function DictationTrainer({ sentences: initialSentences, initialHistory =
         </button>
 
         {feedback ? <p className="mt-3 text-sm font-medium text-[#1f4d59]">{feedback}</p> : null}
+        <p className="mt-2 text-xs text-[#5a767d]">Đã nộp {initialHistory.length} bài trong phiên này.</p>
         {wordReveal && (
           <div className="mt-4 p-3 rounded-xl bg-[#f3faf9] border border-[#d0e3e1]">
             {wordReveal.map((w, i) => {

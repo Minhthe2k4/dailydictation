@@ -482,20 +482,27 @@ export async function POST(req: Request) {
 
     // Fallback strategy: timedtext endpoint parsing.
     const trackListUrl = `https://www.youtube.com/api/timedtext?v=${encodeURIComponent(videoId)}&type=list`;
-    const trackListRes = await fetch(trackListUrl, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept-Language": "ko-KR,ko;q=0.9",
-      },
-    });
+    let tracks: TrackInfo[] = [];
+    
+    try {
+      const trackListRes = await fetch(trackListUrl, {
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+          "Accept-Language": "ko-KR,ko;q=0.9",
+        },
+      });
 
-    if (!trackListRes.ok) {
-      throw new Error(`Subtitle track list fetch failed: ${trackListRes.status}`);
+      if (trackListRes.ok) {
+        const trackListXml = await trackListRes.text();
+        tracks = parseTrackListXml(trackListXml);
+        console.log(`[YouTube] Found ${tracks.length} subtitle tracks for video ${videoId}`);
+      } else {
+        console.warn(`[YouTube] Track list fetch failed: ${trackListRes.status}`);
+      }
+    } catch (trackListError) {
+      console.warn(`[YouTube] Error fetching track list:`, trackListError);
     }
-
-    const trackListXml = await trackListRes.text();
-    const tracks = parseTrackListXml(trackListXml);
 
     const koreanTracks = tracks.filter((track) => track.langCode.toLowerCase().startsWith("ko"));
 
@@ -509,8 +516,13 @@ export async function POST(req: Request) {
       `https://www.youtube.com/api/timedtext?v=${encodeURIComponent(videoId)}&lang=ko&kind=asr&fmt=json3`
     );
 
+    // Try without kind parameter
+    urlsToTry.push(
+      `https://www.youtube.com/api/timedtext?v=${encodeURIComponent(videoId)}&lang=ko`
+    );
+
     // Then explicit track attempts based on YouTube track list
-    for (const track of koreanTracks.length > 0 ? koreanTracks : tracks) {
+    for (const track of koreanTracks.length > 0 ? koreanTracks : tracks.slice(0, 10)) {
       const params = new URLSearchParams({
         v: videoId,
         lang: track.langCode,
@@ -526,13 +538,51 @@ export async function POST(req: Request) {
       }
 
       urlsToTry.push(`https://www.youtube.com/api/timedtext?${params.toString()}`);
+
+      // Also try without fmt parameter
+      const paramsNoFmt = new URLSearchParams({
+        v: videoId,
+        lang: track.langCode,
+      });
+      if (track.kind) {
+        paramsNoFmt.set("kind", track.kind);
+      }
+      urlsToTry.push(`https://www.youtube.com/api/timedtext?${paramsNoFmt.toString()}`);
+    }
+
+    // Try fetching any available language if Korean not found
+    if (koreanTracks.length === 0 && tracks.length > 0) {
+      for (const track of tracks.slice(0, 5)) {
+        const params = new URLSearchParams({
+          v: videoId,
+          lang: track.langCode,
+          fmt: "json3",
+        });
+        if (track.kind) {
+          params.set("kind", track.kind);
+        }
+        urlsToTry.push(`https://www.youtube.com/api/timedtext?${params.toString()}`);
+      }
     }
 
     let timedChunks: SubtitleChunk[] = [];
-    for (const subtitleUrl of urlsToTry) {
-      timedChunks = await tryFetchTranscript(subtitleUrl);
-      if (timedChunks.length > 0) {
-        break;
+    let selectedLanguage = "ko";
+
+    console.log(`[YouTube] Attempting ${urlsToTry.length} subtitle URLs for video ${videoId}`);
+    for (let i = 0; i < urlsToTry.length; i++) {
+      const subtitleUrl = urlsToTry[i];
+      try {
+        timedChunks = await tryFetchTranscript(subtitleUrl);
+        if (timedChunks.length > 0) {
+          // Extract language from URL params
+          const urlParams = new URL(subtitleUrl, "https://youtube.com").searchParams;
+          selectedLanguage = urlParams.get("lang") || selectedLanguage;
+          console.log(`[YouTube] Successfully fetched ${timedChunks.length} chunks from URL ${i + 1}/${urlsToTry.length} with language: ${selectedLanguage}`);
+          break;
+        }
+      } catch (urlError) {
+        console.warn(`[YouTube] URL ${i + 1}/${urlsToTry.length} failed:`, urlError);
+        continue;
       }
     }
 
@@ -548,9 +598,6 @@ export async function POST(req: Request) {
         { status: 404 }
       );
     }
-
-    const selectedLanguage =
-      koreanTracks[0]?.langCode ?? tracks[0]?.langCode ?? "ko";
     const title = await fetchYoutubeTitle(body.youtubeUrl);
 
     return NextResponse.json({

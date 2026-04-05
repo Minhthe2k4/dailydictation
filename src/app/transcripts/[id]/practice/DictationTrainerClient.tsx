@@ -1,14 +1,7 @@
 "use client";
 import { DictationTrainer } from "@/components/DictationTrainer";
-type Sentence = {
-  id: string;
-  text: string;
-  level: string;
-  vietnameseMean?: string;
-  vocabularyNote?: string;
-  grammarNote?: string;
-  bookmarked?: boolean;
-};
-export default function DictationTrainerClient({ sentences }: { sentences: Sentence[] }) {
-  return <DictationTrainer sentences={sentences} />;
+import { PracticeProgress, PracticeSentence } from "@/types/practice";
+
+export default function DictationTrainerClient({ transcriptId, sentences, initialProgress }: { transcriptId: string; sentences: PracticeSentence[]; initialProgress: PracticeProgress | null }) {
+  return <DictationTrainer transcriptId={transcriptId} sentences={sentences} initialProgress={initialProgress} />;
 }
